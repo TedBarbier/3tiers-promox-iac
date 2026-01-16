@@ -1,0 +1,131 @@
+---
+- name: Déployer application 3-tiers avec Helm
+  hosts: localhost
+  gather_facts: no
+  vars:
+    kube_namespace: my-app
+    helm_release: my-app
+    helm_chart_path: "../helm/charts/my-app"
+    values_file_path: "../helm/charts/my-app/values.yaml"
+    clean_deploy: false
+    # Secrets PostgreSQL
+    postgres_db: myappdb
+    postgres_user: appuser
+    postgres_password: "{{ lookup('env','PG_PASSWORD') | default('changeme', true) }}"
+    # DockerHub credentials
+    dockerhub_username: "{{ lookup('env','DOCKERHUB_USERNAME') | default('', true) }}"
+    dockerhub_password: "{{ lookup('env','DOCKERHUB_PASSWORD') | default('', true) }}"
+  
+  tasks:
+    - name: Nettoyer le namespace si demandé
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1
+        kind: Namespace
+        name: "{{ kube_namespace }}"
+      when: clean_deploy | bool
+      
+    - name: Attendre la suppression complète du namespace
+      ansible.builtin.pause:
+        seconds: 10
+      when: clean_deploy | bool
+
+    - name: Créer le namespace Kubernetes
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ kube_namespace }}"
+
+    - name: Créer le secret PostgreSQL (nom corrigé)
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: postgres-secret
+            namespace: "{{ kube_namespace }}"
+          type: Opaque
+          stringData:
+            db-name: "{{ postgres_db }}"
+            db-user: "{{ postgres_user }}"
+            db-password: "{{ postgres_password }}"
+
+    - name: Créer le secret DockerHub (si credentials fournis)
+      ansible.builtin.shell: |
+        kubectl create secret docker-registry my-dockerhub-secret \
+          --docker-server=https://index.docker.io/v1/ \
+          --docker-username="{{ dockerhub_username }}" \
+          --docker-password="{{ dockerhub_password }}" \
+          --namespace={{ kube_namespace }} \
+          --dry-run=client -o yaml | kubectl apply -f -
+      when: dockerhub_username != '' and dockerhub_password != ''
+      register: dockerhub_secret_result
+      changed_when: "'created' in dockerhub_secret_result.stdout or 'configured' in dockerhub_secret_result.stdout"
+
+    - name: Vérifier si la release Helm existe
+      ansible.builtin.command:
+        cmd: "helm list -n {{ kube_namespace }} -q"
+      register: helm_releases
+      changed_when: false
+      failed_when: false
+
+    - name: Nettoyer les ressources orphelines si la release n'existe pas
+      ansible.builtin.shell: |
+        kubectl delete deployment --all -n {{ kube_namespace }} --ignore-not-found=true
+        kubectl delete statefulset --all -n {{ kube_namespace }} --ignore-not-found=true
+        kubectl delete service --all -n {{ kube_namespace }} --ignore-not-found=true
+      when: helm_release not in helm_releases.stdout_lines
+      ignore_errors: yes
+
+    - name: Déployer le chart Helm
+      kubernetes.core.helm:
+        release_name: "{{ helm_release }}"
+        chart_ref: "{{ helm_chart_path }}"
+        release_namespace: "{{ kube_namespace }}"
+        create_namespace: false
+        values_files:
+          - "{{ values_file_path }}"
+        state: present
+        force: true
+        wait: true
+        wait_timeout: 5m
+
+    - name: Attendre que les pods soient prêts
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: "{{ kube_namespace }}"
+      register: pod_list
+      until: >
+        pod_list.resources | 
+        selectattr('status.phase', 'equalto', 'Running') | 
+        list | length >= 3
+      retries: 30
+      delay: 10
+      ignore_errors: yes
+
+    - name: Afficher le statut des pods
+      ansible.builtin.debug:
+        msg: "Pod {{ item.metadata.name }}: {{ item.status.phase }}"
+      loop: "{{ pod_list.resources }}"
+      when: pod_list.resources is defined
+
+    - name: Récupérer les services
+      kubernetes.core.k8s_info:
+        kind: Service
+        namespace: "{{ kube_namespace }}"
+      register: service_list
+
+    - name: Afficher les informations d'accès
+      ansible.builtin.debug:
+        msg:
+          - "=== APPLICATION DÉPLOYÉE ==="
+          - "Frontend accessible sur: http://<NODE_IP>:{{ item.spec.ports[0].nodePort }}"
+          - "Pour obtenir l'IP du noeud: kubectl get nodes -o wide"
+      loop: "{{ service_list.resources }}"
+      when: 
+        - item.metadata.name == 'frontend'
+        - item.spec.type == 'NodePort'

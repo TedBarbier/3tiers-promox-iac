@@ -1,0 +1,19 @@
+# Ansible & Secrets
+ansible/inventory.yml
+ansible/dockerconfig.json.j2
+.env
+*.key
+*.pem
+
+# Backups et fichiers temporaires
+*.org
+*.org[0-9]
+.DS_Store
+
+# Node.js / Frontend
+node_modules/
+dist/
+.eslintcache
+
+# Logs
+*.log
