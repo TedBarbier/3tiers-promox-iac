@@ -42,7 +42,7 @@ function App() {
 
   return (
     <div style={{ padding: '20px', fontFamily: 'sans-serif' }}>
-      <h1>Ma 3-Tier App</h1>
+      <h1>Mon App 3-Tiers</h1>
       <p><strong>Status :</strong> {status}</p>
       <hr />
       
